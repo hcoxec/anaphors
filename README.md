@@ -37,12 +37,12 @@ Included under the scripts directory is a file **run.sh** which runs all of thes
 
 ### General
 
-- Data is provided in the ```data/redundant_predicates``` directory.
+1.  Data is provided in the ```data/redundant_predicates``` directory.
 
 
-- Code for the main multi-agent experiments (section "Languages with anaphoric structure emerge between neural agents") is found in the ```code``` directory.
+2. Code for the main multi-agent experiments (section "Languages with anaphoric structure emerge between neural agents") is found in the ```code``` directory.
 
-Hyperparameters used in our experiments
+Hyperparameters used in our experiments:
 
 1. Language
 - `signal_alphabet_size`: size of the vocabulary in the communication channel (26)
@@ -68,10 +68,11 @@ For evaluation, use the notebook ```interaction_checkpoint_eval.ipynb```.
 ```learnability_config.jsonnet``` specifies the config used in the multi-agent experiments whose checkpoints are being evaluated. This file also imports functions from ```analyser.py```, which provides support for computing the measures outlined in the paper (the file itself is a modified version of the Scorer class in the main emerge repo).
 
 
-- Code for the first section of the paper "Neural agents can learn languages with anaphoric structure" can be found as Jupter notebooks in the ```experiments``` directory:
+3.  Code for the first section of the paper "Neural agents can learn languages with anaphoric structure" can be found as Jupter notebooks in the ```experiments``` directory:
  - ```learnability_expts.ipynb``` (training Receiver, computing Predictive Ambiguity)
  - ```learnability_eval.ipynb``` (plotting loss curves)
  - ```su_handcrafted_langs.ipynb``` (computing signal uniqueness for handcrafted languages)
+
 *N.B.: learnability code still to be finalised, so there may be bugs with loading data, etc.*
 
 #### Attribution
