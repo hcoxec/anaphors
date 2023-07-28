@@ -65,7 +65,7 @@ Hyperparameters used in our experiments:
 - `check_every`: frequency of validation, in no. epochs (100)
 
 For evaluation, use the notebook ```interaction_checkpoint_eval.ipynb```.
-```learnability_config.jsonnet``` specifies the config used in the multi-agent experiments whose checkpoints are being evaluated. This file also imports functions from ```analyser.py```, which provides support for computing the measures outlined in the paper (the file itself is a modified version of the Scorer class in the main emerge repo).
+```interaction_config.jsonnet``` specifies the config used in the multi-agent experiments whose checkpoints are being evaluated. This file also imports functions from ```analyser.py```, which provides support for computing the measures outlined in the paper (the file itself is a modified version of the Scorer class in the main emerge repo).
 
 
 3.  Code for the first section of the paper "Neural agents can learn languages with anaphoric structure" can be found as Jupter notebooks in the ```experiments``` directory:
