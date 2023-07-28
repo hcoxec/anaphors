@@ -1,374 +1,550 @@
-from sklearn.preprocessing import scale
-import torch
-import torch.nn as nn
-from torch import optim
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch.nn.utils.rnn import pad_sequence
+from nltk import CFG
+#from nltk import grammar
+from nltk.parse.generate import generate
+from pcfg import PCFG
 
-import attr
-import re
-import unicodedata
+import _jsonnet
 import json
 
-from collections import defaultdict
+import random
+from os.path import exists
 
-from utils import registry
+from torch.utils.data import DataLoader, Dataset, TensorDataset
+import torch
 
+from ScaledDataset import ScaledDataset
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from itertools import combinations
 
-@attr.s
-class TwoPredicatesExample:
-    source = attr.ib()
-    target = attr.ib()
-    dep_tags = attr.ib(default=None)
-    pos_tags = attr.ib(default=None)
-    source_tensor = attr.ib(default=None)
-    target_tensor = attr.ib(default=None)
-
-class Lang:
-    ''''
-    A general class for preprocessing datasets. A lang is created
-    for the input and output languages. This should be subclassed for each
-    dataset. Built-in methods for normalization can be overwritten.
-    Each subclss should implement methods for adding each sentence to 
-    the language
-    
+class objectview(object):
     '''
-    def __init__(self, args, name):
-        pass
+    An object that makes a dictionary's keys attributes of the object, so they can
+    be called by subscripting (mimics the functionality of argparse)
+    '''
+    def __init__(self, d):
+        self.__dict__ = d
 
-    def addSentence(self, sentence):
-        raise NotImplementedError
 
-    # Turn a Unicode string to plain ASCII, thanks to
-    # https://stackoverflow.com/a/518232/2809427
-    def unicodeToAscii(self, s):
-        return ''.join(
-            c for c in unicodedata.normalize('NFD', s)
-            if unicodedata.category(c) != 'Mn'
-        )
+class DataHandler(object):
+    '''
+    An object that handles loading of data, then divides it into a variety
+    of structures suitable for training, eval, and analysis
+    '''
 
-    # Lowercase, trim, and remove non-letter characters
+    def __init__(self, args):
+        ''''
+        Takes an subscriptable arg dict as input, creates object attributes
+        for relevant hyperparameters. Then runs preprocessing and data loading
+        or generation automatically during init.
+        '''
+        self.opts = args
+        lang_params = self.opts.lang_params  # determines the number of nouns and verbs
+        self.n_count, self.v_count = lang_params[0], lang_params[1] #the number of nouns/verbs we want to initially generate
+        self.noun_cap = lang_params[2] #the number of nouns we want to use in our game
+        self.verb_cap = lang_params[3] #the number of verbs we want to use in our game
+        self.gram_fn = self.opts.gram_fn
 
-    def normalizeString(self, s):
-        s = self.unicodeToAscii(s.strip())
-        s = re.sub(r"([.!?])", r" \1", s)
-        s = re.sub(r"[^a-zA-Z.!?_()]+", r" ", s)
-        return s
+        # get dataset family
+        self.dataset = self.opts.dataset
 
-    def addWord(self, word):
-        if word not in self.word2index:
-            self.word2index[word] = self.n_words
-            self.word2count[word] = 1
-            self.index2word[self.n_words] = word
-            self.n_words += 1
-            self.words.append(word)
+        # check which dataset we want
+        self.setting = self.opts.setting
+
+        # if we want to play around with uniform or powerlaw distributions
+        self.probs = self.opts.probs
+
+        # pretend data is larger for reinforce
+        self.scaling_factor = int(self.opts.data_scaling)
+
+        if self.probs == "mixed":
+            self.init_grammar()
         else:
-            self.word2count[word] += 1
+            self.grammar = self.init_grammar()
 
-    def to_dict(self):
-        raise NotImplementedError
+        if self.probs == "uniform" or self.probs == "mixed":
+            self.initial_phrases = self.get_phrases()
 
-    def __len__(self):
-        return len(self.sentences)
+        # whether to sample redundant sentences (True) or not (False)
+        self.red = self.opts.red
 
-    def __getitem__(self, idx):
-        return self.sentences[idx] 
+        # sample from all generated phrases if necessary
+        self.phrases = self.pick_phrases(self.red)
 
-
-@registry.register("preprocess_lang", "two_predicates")
-class TwoPredicatesLang(Lang):
-    def __init__(self, args, name):
-        self.args = args
-        self.name = name
         self.word2index = {}
         self.word2count = {}
-        self.eos_idx = 0
-        self.words = []
-        self.index2word = {2: "<SOS>", 1: "<EOS>", 0: "<PAD>", 3: "<UNK>"}
-        self.n_words = 2  # Count SOS and EOS
-        self.num_special = len(self.words)
+        self.index2word = {0: "EOS"}
+        self.n_words = 1  # Count EOS
+        self.build_dictionaries()
 
-        self.pos_words = defaultdict(lambda: set())
-        self.dep_words = defaultdict(lambda: set())
+        # for game framework
+        self.n_attributes = len(self.phrases[0].split())
+        self.n_values = self.n_words
 
-        self.sentences = []
+        self.idx_phrases = self.build_idx_phrases()
+        self.hot_grid = self.build_hot_grid()
 
-        self.pos_tags = []
-        self.dep_tags = []
+        #self.lang_type = self.opts.lang_type
+
+        if self.check_for_data():
+            self.load_dataset()
+        else:
+            #self.generate_compositional(self.idx_phrases, self.lang_type)
+            self.build_dataset()
+        
+        # if self.comp_check_for_data():
+        #     self.comp_load_dataset()
+        # else:
+        #     self.generate_compositional(self.idx_phrases)
+
+    def check_for_data(self):
+        '''
+        Looks for a data directory rather than generating
+        data from scratch
+        '''
+        data_paths = [f'data/{self.dataset}/{self.setting}_train_set.tar', f'data/{self.dataset}/{self.setting}_val_set.tar', f'data/{self.dataset}/{self.setting}_test_set.tar']
+        does_exist = sum([exists(file) for file in data_paths]) == 3
+
+        return does_exist
+
+    def build_dataset(self):
+        ''''
+        Generates training test and val splits, then saves the splits
+        to the data directory
+        '''
+        #self.train_set, self.val_set, self.test_set, self.comp_train_set, self.comp_val_set, self.comp_test_set = self.generate_splits(self.hot_grid, train=0.7, test=0.2)
+        self.train_set, self.val_set, self.test_set = self.generate_splits(self.hot_grid, train=0.7, test=0.2)
+        self.train_loader = self.get_loader(self.train_set, bs=self.opts.batch_size)
+        self.val_loader = self.get_loader(self.val_set, bs=int(self.opts.batch_size/5))
+        self.test_loader = self.get_loader(self.test_set, bs=int(self.opts.batch_size/5))
+
+        torch.save(self.train_set, f'data/{self.dataset}/{self.setting}_train_set.tar')
+        torch.save(self.val_set, f'data/{self.dataset}/{self.setting}_val_set.tar')
+        torch.save(self.test_set, f'data/{self.dataset}/{self.setting}_test_set.tar')
+
+        # self.train_comp_loader = self.get_loader(self.comp_train_set)
+        # self.val_comp_loader = self.get_loader(self.comp_val_set)
+        # self.test_comp_loader = self.get_loader(self.comp_test_set)
+
+        # torch.save(self.comp_train_set, f'data/{self.setting}_comp_train_set.tar')
+        # torch.save(self.comp_val_set, f'data/{self.setting}_comp_val_set.tar')
+        # torch.save(self.comp_test_set, f'data/{self.setting}_comp_test_set.tar')
+
+        #saving the corresponding phrase data and grammar
+        with open(f"{self.gram_fn}_dict.json", 'w+') as outfile:
+            json.dump(self.index2word, outfile, indent=5)
+
+        phrase_data = [self.phrase_train, self.phrase_val, self.phrase_test]
+        names = ['train', 'val', 'test']
+        for x in list(zip(phrase_data, names)):
+            with open(f'data/{self.setting}_{x[1]}_phrase_set.txt', 'w+') as f:
+                for phrase in x[0]:
+                    f.write(f"{phrase}\n")
+
+    def load_dataset(self):
+        '''
+        Loads a serialized dataset from local data directoy,
+        and places it on the CPU
+        '''
+
+        self.train_set = torch.load(f'data/{self.dataset}/{self.setting}_train_set.tar', map_location=torch.device('cpu'))
+        self.val_set = torch.load(f'data/{self.dataset}/{self.setting}_val_set.tar', map_location=torch.device('cpu'))
+        self.test_set = torch.load(f'data/{self.dataset}/{self.setting}_test_set.tar', map_location=torch.device('cpu'))
+
+        self.raw_train = self.train_set.tensors[0]
+        self.raw_val = self.val_set.tensors[0]
+        self.raw_test = self.test_set.tensors[0]
+
+        self.train_loader = self.get_loader(self.train_set, bs=self.opts.batch_size)
+        self.val_loader = self.get_loader(self.val_set, bs=int(self.opts.batch_size/5))
+        self.test_loader = self.get_loader(self.test_set, bs=int(self.opts.batch_size/5))
+
+        # self.comp_train_set = torch.load(f'datafinal/{self.setting}_comp_train_set.tar', map_location=torch.device('cpu'))
+        # self.comp_val_set = torch.load(f'datafinal/{self.setting}_comp_val_set.tar', map_location=torch.device('cpu'))
+        # self.comp_test_set = torch.load(f'datafinal/{self.setting}_comp_test_set.tar', map_location=torch.device('cpu'))
+
+        # self.train_comp_loader = self.get_loader(self.comp_train_set)
+        # self.val_comp_loader = self.get_loader(self.comp_val_set)
+        # self.test_comp_loader = self.get_loader(self.comp_test_set)
+
+    def pick_phrases(self, redundant=True):
+        '''
+        randomly sample from a list of generated phrases without replacement
+        if redundant=False, then ignore all sentences with repeated nouns/verbs
+        '''
+        if self.probs == "uniform":
+            red_phrases = []
+            nonred_phrases = []
+            for x in self.initial_phrases:
+                y = x.split()
+                if y[0] == y[3] or y[1] == y[4]:
+                    red_phrases.append(x)
+                else:
+                    nonred_phrases.append(x)
+            initial_phrases = red_phrases + random.sample([p for p in nonred_phrases], 20000-len(red_phrases)) #choose all possible generated redundant phrases, and sample from non-redundant for remaining data
+            return self.initial_phrases
+
+        elif self.probs == "powerlaw":
+            initial_phrases = []
+            for x in self.grammar.generate(100000):
+                initial_phrases.append(x)
+            if not redundant:
+                filtered_phrases = []
+                for x in initial_phrases:
+                    y = x.split()
+                    if y[0] != y[3] and y[1] != y[4]:
+                        filtered_phrases.append(x)
+                new_phrases = random.sample(filtered_phrases, 20000)
+            else:
+                new_phrases = random.sample(initial_phrases, 20000)
+            return new_phrases
+
+        elif self.probs == "mixed":
+            if redundant:
+                red_phrases = []
+                plaw_phrases = []
+                for x in self.initial_phrases:
+                    y = x.split()
+                    if y[0] == y[3] or y[1] == y[4]:
+                        red_phrases.append(x)
+
+                for x in self.plawgram.generate(100000):
+                    plaw_phrases.append(x)
+                filtered_plaw_phrases = []
+                for x in plaw_phrases:
+                    y = x.split()
+                    if y[0] != y[3] and y[1] != y[4]:
+                        filtered_plaw_phrases.append(x)
+                new_plaw_phrases = random.sample(filtered_plaw_phrases, 20000-len(red_phrases))
+                final_phrases = random.sample(new_plaw_phrases+red_phrases, 20000)
+            return final_phrases
 
     def addSentence(self, sentence):
-        sentence = self.normalizeString(sentence)
-        dep, pos = ['subj', 'verb', 'obj'], ['NOUN', 'VERB', 'NOUN']
-
-        for i, word in enumerate(sentence.split(' ')):
+        '''
+        preprocessing of data sentences, adding one word at a time to the language
+        dictionaries
+        '''
+        for word in sentence.split(' '):
             self.addWord(word)
-            self.pos_words[pos[i]].add(word)
-            self.dep_words[dep[i]].add(word)
- 
-        self.sentences.append(
-            {
-                self.name : sentence.split(' '), 
-                'pos_tags': pos, 
-                'dep_tags': dep
-            }
-        )
-
-    # Turn a Unicode string to plain ASCII, thanks to
-    # https://stackoverflow.com/a/518232/2809427
-    def unicodeToAscii(self, s):
-        return ''.join(
-            c for c in unicodedata.normalize('NFD', s)
-            if unicodedata.category(c) != 'Mn'
-        )
-
-    # Lowercase, trim, and remove non-letter characters
-
-    def normalizeString(self, s):
-        s = self.unicodeToAscii(s.strip())
-        s = re.sub(r"([.!?])", r" \1", s)
-        s = re.sub(r"[^a-zA-Z.!?_()]+", r" ", s)
-        return s
 
     def addWord(self, word):
+        '''
+        Adds a word to dictionaries that map from an index to a word and back,
+        also tracks the number of words in the language
+        '''
         if word not in self.word2index:
             self.word2index[word] = self.n_words
             self.word2count[word] = 1
             self.index2word[self.n_words] = word
             self.n_words += 1
-            self.words.append(word)
         else:
             self.word2count[word] += 1
 
-    def to_dict(self):
-        list_pos_words, list_dep_words = {}, {}
-        for pos in self.pos_words.keys():
-            list_pos_words[pos] = list(self.pos_words[pos])
+    def init_grammar(self):
+        '''
+        Loads grammar rules and terminals from file
 
-        for dep in self.dep_words.keys():
-            list_dep_words[dep] = list(self.dep_words[dep])
+        returns: nltk.CFG
+        '''
+        if self.probs == "uniform":
+            with open("words/verbs-discourse.txt") as verbfile:
+                VERBS = [line.strip() for line in verbfile][:self.verb_cap]
+            with open("words/nouns-discourse.txt") as nounfile:
+                NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
+            with open("words/rules-discourse.txt") as rulefile:
+                RULES = [line.strip() for line in rulefile]
 
-        lang_dict = {
-            'name': self.name,
-            'vocab': self.words,
-            'word2index': self.word2index,
-            'index2word': self.index2word,
-            'word2count': self.word2count,
-            'pos_words': list_pos_words,
-            'dep_words': list_dep_words,
-        }
-        return lang_dict
+            self.verbs = VERBS
+            self.nouns = NOUNS
 
-    def __len__(self):
-        return len(self.index2word.keys())+3 
+            v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
+            n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
-    def __getitem__(self, idx):
-        return self.words[idx] if idx < len(self.words) else self.unk_word
+            with open('words/grammar-discourse.txt', 'w') as f:
+                for item in RULES + v_rules + n_rules:
+                    f.write("%s\n" % item)
+            with open("words/grammar-discourse.txt") as grammarfile:
+                grammar = [line.strip() for line in grammarfile]
+            return CFG.fromstring(grammar)
 
+        elif self.probs == "powerlaw":
+            with open("words/plaw_grammar-discourse.txt") as grammarfile:
+                grammar = [line.strip() for line in grammarfile]
+            return PCFG.fromstring(grammar)
 
-    def get_pos(self, pos_words):
-        for pos in pos_words.keys():
-            s_pos = pos.lower()+'s'
-            setattr(self, s_pos, list(pos_words[pos]))
+        elif self.probs == "mixed":
+            with open("words/verbs-discourse.txt") as verbfile:
+                VERBS = [line.strip() for line in verbfile][:self.verb_cap]
+            with open("words/nouns-discourse.txt") as nounfile:
+                NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
+            with open("words/rules-discourse.txt") as rulefile:
+                RULES = [line.strip() for line in rulefile]
 
-    def load(self, as_dict):
-        self.words = as_dict['vocab']
-        self.word2index = as_dict['word2index']
-        self.index2word = as_dict['index2word']
-        self.word2count = as_dict['word2count']
-        self.pos_words = as_dict['pos_words']
-        self.dep_words = as_dict['dep_words']
-        self.n_words = len(self.index2word)
+            self.verbs = VERBS
+            self.nouns = NOUNS
 
-        self.get_pos(self.pos_words)
+            v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
+            n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
+            with open('words/grammar-discourse.txt', 'w') as f:
+                for item in RULES + v_rules + n_rules:
+                    f.write("%s\n" % item)
+            with open("words/grammar-discourse.txt") as grammarfile:
+                grammar = [line.strip() for line in grammarfile]
+            self.unifgram = CFG.fromstring(grammar)
 
+            with open("words/plaw_grammar-discourse.txt") as grammarfile:
+                grammar = [line.strip() for line in grammarfile]
+            self.plawgram = PCFG.fromstring(grammar)
 
-@registry.register("dataset", "two_predicates")
-class TwoPredicatesDataset(Dataset):
-    def __init__(self, args, split, scaling=None) -> None:
-        self.args = args
-        self.split = split
+    def get_phrases(self):
+        '''
+        Returns all strings generated by the grammar
+            input: None
+            output: all_phrases [list]
 
-        if scaling:
-            self.data_scaling = scaling
-        elif hasattr(args, 'data_scaling'):
-            self.data_scaling = args.data_scaling
-        else:
-            self.data_scaling = 1
-                    
-        self.load_preproc()
-        self.tensors_from_preproc(self.enc_lang, self.dec_lang, self.examples)
+        '''
+        if self.probs == "uniform":
+            return [' '.join(x) for x in generate(self.grammar)]
+        elif self.probs == "mixed":
+            return [' '.join(x) for x in generate(self.unifgram)]
 
-        self.true_len = len(self.examples)
+    def build_dictionaries(self):
+        '''
+        Preprocessing helper, adds one sentence at a time from phrases to dictionaries
+        !Requires there be a self.phrases attribute!
+        '''
+        for i in self.phrases:
+            self.addSentence(i)
 
-        self.n_attributes = len(self.enc_lang.dep_words.keys())
-        self.n_values = self.enc_lang.n_words
+    def build_hot_grid(self):
+        '''
+        Builds one massive tensor with all data one-hot encoded
+        !Requires there be a self.phrases attribute!
 
-        super().__init__()
-
-    def load_preproc(self):
-        save_path = f'data/{self.args.dataset}/preprocess'
-
-        paired_examples, langs, loaded_data = [], [], []
-        for section in ['enc_preprocess', 'dec_preprocess']:
-            section_path = f"{save_path}/{self.args.preprocess_version}_{self.split}/{section}"
-            with open(f"{section_path}/lang.json", "rb") as outfile:
-                lang = json.load(outfile)
-            examples = []
-            with open(f"{section_path}/data.json") as outfile:
-                for line in outfile:
-                    examples.append(json.loads(line))
-            
-            langs.append(lang)
-            paired_examples.append(examples)
-
-        for src_example, target_example in zip(*paired_examples):
-            ex = TwoPredicatesExample(
-                source=src_example['source'],
-                target=target_example['target'],
-                dep_tags=src_example['dep_tags'],
-                pos_tags=src_example['pos_tags']
-
-            )
-            loaded_data.append(ex)
-
-
-        enc_lang, dec_lang = TwoPredicatesLang(self.args, 'encoder'), TwoPredicatesLang(self.args, 'decoder')
-        enc_lang.load(langs[0])
-        dec_lang.load(langs[1])
-
-        self.enc_lang = enc_lang
-        self.dec_lang = dec_lang
-        self.examples = loaded_data
-
-        print(f'   -{self.split} Preprocess found and loaded')
-
-    def indexesFromSentence(self, lang, sentence):
-        return [lang.word2index[word] for word in sentence]
-
-    def tensorFromSentence(self, lang, sentence):
-        indexes = self.indexesFromSentence(lang, sentence)
-
-        return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
-    def tensorsFromPair(self, data_pairs):
-        tensor_x, tensor_y = [], []
-        for pair in data_pairs:
-            tensor_x.append(self.tensorFromSentence(self.enc_lang, pair[0]))
-            tensor_y.append(self.tensorFromSentence(self.dec_lang, pair[1]))
-
-        return tensor_x, tensor_y
-
-    def make_hot(self, example, n_words):
-        one_hot = torch.zeros(len(example), n_words, dtype=torch.float)
-        for w, word_idx in enumerate(example):
-            one_hot[w][word_idx] = 1
-            
-        return one_hot
-
-    def batched_make_hot(self, data, n_words):
-        one_hots = []
-        for example in data:
-            this_grid = torch.zeros(len(example), n_words, dtype=torch.float)
-            for w, word_idx in enumerate(example):
+            input: None
+            output: torch.tensor dims n_phrases X n_words
+        '''
+        master_grid = []
+        for i, phrase in enumerate(self.phrases):
+            this_grid = torch.zeros(len(phrase.split()), self.n_words)
+            for w, word in enumerate(phrase.split()):
+                word_idx = self.word2index[word]
                 this_grid[w][word_idx] = 1
-            one_hots.append(this_grid.view(-1))
-        
-        return one_hots
+            master_grid.append(this_grid.view(-1))
+        return torch.stack(master_grid)
 
     def build_idx_phrases(self):
+        '''
+        Creates an indexed representation of the data, with an index for each
+        value, for each attribute
+        !Requires there be a self.phrases attribute!
+
+            input: None
+            output: torch.tensor dims n_examples X n_attributes
+        '''
         idx_phrases = []
-        for i, phrase in enumerate(self.training_data.tensor_x):
-            this_grid = torch.zeros(len(self.training_data.tensor_x))
-            for w, word in enumerate(phrase):
-                word_idx = self.inputword2index[word]
-                this_grid[w]= word_idx
+        for i, phrase in enumerate(self.phrases):
+            this_grid = torch.zeros(len(phrase.split()))
+            for w, word in enumerate(phrase.split()):
+                word_idx = self.word2index[word]
+                this_grid[w] = word_idx
             idx_phrases.append(this_grid)
         return torch.stack(idx_phrases)
 
-    def logits_to_idx(self, data_set, batched = False):
+    def generate_splits(self, raw_data, train=0.75, val=0.1, test=0.15):
         '''
-        creates index based reconstructions from logits of attributes and values
+        Generates a random split of the data according to percentages, and returns
+        a dataset object of the split. Assumes input and output are the same
+        as in a reconstruction game.
 
-        inputs:
-
-            dataset: default expects stack of logit tensors
-            batched: if not stack then batched (not tested recently)
+        input:
+            raw_data: training data (torch.tensor or list)
+            train, val, test: percentages of data for each split, can be un-normalized
         '''
-        
-        idx_phrases = []
+        #self.generate_compositional(self.idx_phrases, self.lang_type)
 
-        if batched:
-            for x, y in data_set:
-                one_hot = x.view(x.shape[0],self.n_attributes, self.n_values)
-                idx_phrase = torch.argmax(one_hot, dim=2)
-                idx_phrases.extend(idx_phrase)
+        idx = torch.randperm(raw_data.shape[0])
+        data = raw_data[idx].view(raw_data.size())
+        #comp_data = self.comp_signals[idx].view(self.comp_signals.size())
 
+        total_prob = train + val + test
+        train, val, test = train / total_prob, val / total_prob, test / total_prob
+        train_c, val_c, test_c = int(len(data) * train), int(len(data) * val), int(len(data) * test)
+
+        self.raw_train = data[:train_c]
+        self.raw_val = data[train_c:-test_c]
+        self.raw_test = data[-test_c:]
+
+        # self.comp_train = comp_data[:train_c]
+        # self.comp_val = comp_data[train_c:-test_c]
+        # self.comp_test = comp_data[-test_c:]
+
+        self.phrase_train = []
+        self.phrase_val = []
+        self.phrase_test = []
+
+        for element in self.raw_train.view(len(self.raw_train), self.n_attributes, self.n_values).argmax(dim=2):
+            phrase = ' '.join([self.index2word[e.item()] for e in element])
+            self.phrase_train.append(phrase)
+
+        for element in self.raw_val.view(len(self.raw_val), self.n_attributes, self.n_values).argmax(dim=2):
+            phrase = ' '.join([self.index2word[e.item()] for e in element])
+            self.phrase_val.append(phrase)
+
+        for element in self.raw_test.view(len(self.raw_test), self.n_attributes, self.n_values).argmax(dim=2):
+            phrase = ' '.join([self.index2word[e.item()] for e in element])
+            self.phrase_test.append(phrase)
+
+        train_set = ScaledDataset(self.raw_train, self.raw_train, scaling_factor=self.scaling_factor)
+        val_set = TensorDataset(self.raw_val, self.raw_val)
+        test_set = TensorDataset(self.raw_test, self.raw_test)
+
+        # comp_train_set = TensorDataset(self.comp_train, self.raw_train)
+        # comp_val_set = TensorDataset(self.comp_val, self.raw_val)
+        # comp_test_set = TensorDataset(self.comp_test, self.raw_test)
+
+        return train_set, val_set, test_set
+        #return train_set, val_set, test_set, comp_train_set, comp_val_set, comp_test_set
+
+    def get_loader(self, data_set, shuffle=True, bs=32, drop=True):
+        '''
+        Creates a torch dataloader of a dataset for use during training.
+        input:
+            data_set: usually a TensorDataset, but anything iterable works
+            shuffle: randomly order batches each epoch of training
+            bs: batch sizer for loader
+        '''
+        return DataLoader(data_set, batch_size=bs, shuffle=shuffle, drop_last=drop)
+
+    def generate_compositional(self, semantics, ltype, signal_len=10, n_chars=26):
+        '''
+        For creating the handcrafted languages for the first experiment with the Receiver only
+
+        Generates a perfectly compositional language for a given semantic
+        representation.
+
+        input:
+            semantics: list of index semantics generated by build_idx_phrases or similar
+            signal_len: number of chars in each signal
+            n_chars: number of chars to choose from in the language
+
+            !signal_len must be divisible by n_attributes!
+        '''
+        self.idx2signal = {}
+        subsignals = [x for x in combinations(range(2, n_chars), signal_len // 5)]
+        random.shuffle(subsignals)
+        for i, idx in enumerate(self.index2word.keys()):
+            self.idx2signal[idx] = subsignals[i]
+
+        #the "Pronoun" language: adds 'did too'/'pronoun' signal character for repeated noun/verb
+        if ltype == "tok":
+            self.idx2signal[len(self.idx2signal)] = 26 #pronoun token
+            self.idx2signal[len(self.idx2signal)] = 27 #'did too' token
+        all_signals = []
+
+        #the "No Elision" language: repeats the original signal for a repeated noun/verb
+        if ltype == "comp":
+            for sem in semantics:
+                one_signal = []
+                for pos in sem: # not redundant
+                    one_signal.extend(self.idx2signal[int(pos)])
+                one_signal.append(0)
+                all_signals.append(one_signal)
+
+        #the "Pro-drop" language: removes/doesn't append any signal character for a repeated noun/verb
+        elif ltype == "null":
+            for sem in semantics:
+                one_signal = []
+                if sem[0] == sem[3] and sem[1] == sem[4]: #fully redundant
+                    for i, pos in enumerate(sem):
+                        if i != 3 and i != 4:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                elif sem[0] == sem[3]: #partially redundant
+                    for i, pos in enumerate(sem):
+                        if i != 3:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                elif sem[1] == sem[4]: #partially redundant
+                    for i, pos in enumerate(sem):
+                        if i != 4:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                else:
+                    for pos in sem: #not redundant
+                        one_signal.extend(self.idx2signal[int(pos)])
+                while len(one_signal) != 11:
+                    one_signal.append(0) #for EOS
+                all_signals.append(one_signal)
+
+
+        elif ltype == "tok":
+            for sem in semantics:
+                one_signal = []
+                if sem[0] == sem[3] and sem[1] == sem[4]: #fully redundant
+                    for i, pos in enumerate(sem):
+                        if i == 3:
+                            one_signal.append(self.idx2signal[len(self.idx2signal) - 2])
+                        if i == 4:
+                            one_signal.append(self.idx2signal[len(self.idx2signal) - 1])
+                        else:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                elif sem[0] == sem[3]: #partially redundant
+                    for i, pos in enumerate(sem):
+                        if i == 3:
+                            one_signal.append(self.idx2signal[len(self.idx2signal) - 2])
+                        else:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                elif sem[1] == sem[4]: #partially redundant
+                    for i, pos in enumerate(sem):
+                        if i == 4:
+                            one_signal.append(self.idx2signal[len(self.idx2signal) - 1])
+                        else:
+                            one_signal.extend(self.idx2signal[int(pos)])
+                else:
+                    for i, pos in enumerate(sem): #not redundant
+                        one_signal.extend(self.idx2signal[int(pos)])
+                while len(one_signal) != 11:
+                    one_signal.append(0) #for EOS
+                all_signals.append(one_signal)
+
+        if ltype == "tok":
+            target_signals = self.build_any_grid(all_signals, 28)
         else:
-            one_hot = data_set.view(data_set.shape[0],self.n_attributes, self.n_values)
-            return torch.argmax(one_hot, dim=2)
-            #idx_phrases.append(idx_phrase)
+            target_signals = self.build_any_grid(all_signals, 26)
 
-        return torch.stack(idx_phrases)
+        self.comp_signals = torch.tensor(all_signals)
+        self.comp_data = target_signals
 
     def build_any_grid(self, idx_signals, n_chars):
-            master_grid = []
-            for i, phrase in enumerate(idx_signals):
-                this_grid = torch.zeros(len(idx_signals[0]), n_chars)
-                for w, word in enumerate(phrase):
-                    this_grid[w][word] = 1
-                master_grid.append(this_grid)
-            return torch.stack(master_grid)
+        '''
+        Generalization of build_idx_phrases, creates an index-based semantic
+        representation not strictly tied to self.phrases. Intended to create
+        a one hot grid for compositional signals, to train one agent on signal
+        meaning pairs
 
-    def tensors_from_preproc(self, enc_lang, dec_lang, examples):
-        self.xs, self.ys = [], []
-        for example in examples:
-            src_tensor = self.make_hot(
-                self.tensorFromSentence(enc_lang, example.source),
-                enc_lang.n_words
-            ).view(-1)
-
-            tgt_tensor = self.make_hot(
-                self.tensorFromSentence(dec_lang, example.target),
-                dec_lang.n_words
-            ).view(-1)
-            example.source_tensor = src_tensor
-            example.target_tensor = tgt_tensor
-            self.xs.append(src_tensor)
-            self.ys.append(tgt_tensor)
-    
-        try:
-            self.create_batched_tensors(self.xs, self.ys)
-
-        except Exception as e:
-            print(f"!Examples not all the same length, stacked tensors not created!")
-
-    def create_batched_tensors(self, xs, ys):
-        tensor_xs = torch.stack(xs)
-        tensor_ys = torch.stack(ys)
-        self.tensors = [tensor_xs, tensor_ys]
-        self.input_tensors, self.output_tensors = tensor_xs, tensor_ys
-        
+        input:
+            idx_signals: list n_examples X n_attributes
+            n_chars: number of chars in language
+        '''
+        master_grid = []
+        longest = 0
+        for phrase in idx_signals:
+            if len(phrase) > longest:
+                longest = len(phrase)
+        for i, phrase in enumerate(idx_signals):
+            #this_grid = torch.zeros(len(idx_signals[0]), n_chars)
+            this_grid = torch.zeros(longest, n_chars)
+            for w, word in enumerate(phrase):
+                this_grid[w][word] = 1
+            master_grid.append(this_grid)
+        return torch.stack(master_grid)
 
     def __len__(self):
-        if self.data_scaling:
-            scaled_len = len(self.xs) * self.data_scaling
-        else:
-            scaled_len = len(self.xs)
+        return len(self.phrases)
 
-        return scaled_len
+def main():
+    args = objectview(json.loads(_jsonnet.evaluate_file('config.jsonnet')))
+    data = DataHandler(args)
+    # print(data.index2word)
+    # print(data.idx_phrases[0])
 
-    def __getitem__(self, k):
-        k = k % len(self.examples)
-        return tuple(
-            [self.examples[k].source_tensor,
-            self.examples[k].target_tensor]
-        )
-
-        
-
-
-
+if __name__ == "__main__":
+    main()

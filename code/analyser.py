@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
 import numpy as np
-
+from collections import OrderedDict
 from itertools import combinations, product
 from Levenshtein import distance
-from math import ceil
+from math import ceil, log
+import re
+import random
 from scipy import stats
 from torch.multiprocessing import Pool
 from collections import defaultdict
@@ -23,7 +25,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Analyser(object):
     
-    def __init__(self, config, game, data):
+    def __init__(self, config, game, data, indices, chars):
         self.config = config
         self.game = game
 
@@ -39,50 +41,556 @@ class Analyser(object):
         self.alpha_semantics = None
         self.alpha_signals = None
 
-
-    def get_interactions(self, dataset, get_hiddens=True, on_cpu=False):
-        ''''
-        input: dataset, expected as a single stack of tensors
-
-        Generates language for a given dataset collecting interactions
-        for each input. Separates into signals, reconstructions, and logits
-
-        todo: make work for non-stacked (batched)
+        self.indices = indices
+        self.chars = chars
         
+        # store the average length of messages for 3 conditions: all messages, semi-redundant, fully redundant
+        self.len_avg = 0
+        self.semiredlen_avg = 0
+        self.redlen_avg = 0
+        self.all_redlen_avg = 0 #semired+fully red
+
+        # signals for partially and fully redundant semantics
+        self.semired_signals = None
+        self.semired_idx_semantics = None
+        self.red_signals = None
+        self.red_idx_semantics = None
+
+        self.all_red_signals = None #semired+fully red
+        self.all_red_idx_semantics = None
+
+        self.other_signals = None #non-redundant
+        self.other_idx_semantics = None
+
+
+    def get_interactions(self, dataset, variable_length, apply_padding=True):
         '''
-        
+        Runs the passed dataset through the model self.game in order to generate
+        interactions, including meaning signal mappings, signal logits, and 
+        semantic reconstructions
+
+        input: dataset (e.g. self.data.raw_train) is usually used
+
+        creates object attributes:
+            self.signals: index signals for each meaning
+            self.reconstructions: predicted semantics logits
+            self.idx_reconstructions: idx version of above (argmax)
+            self.idx_semantics: index based input data
+            self.logits: predicted distribution of chars in the signal
+
+        calculates "reconents", the reconstruction entropies used to compute predictive ambiguity
+        '''
         by_attribute_input = dataset.view(len(dataset), self.n_roles, self.n_atoms)
         labels = by_attribute_input.argmax(dim=-1).view(len(dataset) * self.n_roles)
-
-        if not on_cpu:
-            dataset = dataset.to(self.config.device)
-            self.game = self.game.to(self.config.device)
-            labels = labels.to(self.config.device)
-
         self.game.sender.training = False
         self.game.receiver.training = False
         with torch.no_grad():
             self.loss, self.interaction = self.game(dataset, labels)
 
+            if apply_padding and variable_length:
+                assert self.interaction.message_length is not None
+                for i in range(self.interaction.size):
+                    length = self.interaction.message_length[i].long().item()
+                    self.interaction.message[i, length:] = 0  # 0 is always EOS
+
             self.signals = self.interaction.message
+
+            # get partially and fully redundant signals
+            semired_outputs = []
+            red_outputs = []
+            other_outputs = [] #non-redundant
+
+            # get partially and fully redundant one-hot reps
+            semired_reps = []
+            red_reps = []
+            other_reps = []
+
+            semirednoun_recons = [] #"reconstruction entropies", i.e., entropies used for computing predictive ambiguity
+            semiredverb_recons = []
+            red_recons = []
+            other_recons = []
+
+            for i in range(self.interaction.size):
+                s_i = self.interaction.sender_input[i].view(self.n_roles, self.n_atoms)
+                if torch.equal(s_i[0], s_i[3]):
+                    if not torch.equal(s_i[1], s_i[4]):
+                        semired_outputs.append(self.interaction.message[i])
+                        semired_reps.append(self.interaction.sender_input[i])
+                        semirednoun_recons.append(self.interaction.receiver_output[i])
+                    else:
+                        red_outputs.append(self.interaction.message[i])
+                        red_reps.append(self.interaction.sender_input[i])
+                        red_recons.append(self.interaction.receiver_output[i])
+
+                elif torch.equal(s_i[1], s_i[4]):
+                    semired_outputs.append(self.interaction.message[i])
+                    semired_reps.append(self.interaction.sender_input[i])
+                    semiredverb_recons.append(self.interaction.receiver_output[i])
+
+                else:
+                    other_outputs.append(self.interaction.message[i])
+                    other_reps.append(self.interaction.sender_input[i])
+                    other_recons.append(self.interaction.receiver_output[i])
+
+            self.semired_signals = torch.stack(semired_outputs)
+            self.red_signals = torch.stack(red_outputs)
+            self.other_signals = torch.stack(other_outputs)
+
+            # gather all redundant signals together
+            self.all_red_signals = torch.cat((self.semired_signals, self.red_signals))
+
+            semired_semantics = torch.stack(semired_reps)
+            red_semantics = torch.stack(red_reps)
+            allred_semantics = torch.cat((semired_semantics, red_semantics))
+            other_semantics = torch.stack(other_reps)
+
+            by_attribute_input_semired = semired_semantics.view(len(semired_semantics), self.n_roles, self.n_atoms)
+            by_attribute_input_red = red_semantics.view(len(red_semantics), self.n_roles, self.n_atoms)
+            by_attribute_input_allred = allred_semantics.view(len(allred_semantics), self.n_roles, self.n_atoms)
+            by_attribute_input_other = other_semantics.view(len(other_semantics), self.n_roles, self.n_atoms)
+
+            self.semired_signals.message_length = self.find_lengths(self.semired_signals)
+            self.red_signals.message_length = self.find_lengths(self.red_signals)
+            self.all_red_signals.message_length = self.find_lengths(self.all_red_signals)
+            self.other_signals.message_length = self.find_lengths(self.other_signals)
+
+            # calculate receiver entropy ('predictive ambiguity' measure)
             self.reconstructions = self.interaction.receiver_output
-            self.idx_reconstructions = self.data.logits_to_idx(self.interaction.receiver_output)
-            self.idx_semantics = self.data.logits_to_idx(dataset)
+            self.reconent = torch.distributions.Categorical(logits=self.reconstructions.view(len(self.reconstructions), self.n_roles, self.n_atoms)).entropy()
 
-            self.game.sender.return_raw = True
-            signals, self.logits, entropys = self.game.sender(dataset)
-            self.game.sender.return_raw = False
-            if get_hiddens:
-                self.game.sender.return_encoding = True
-                self.sender_hidden = self.game.sender(dataset)
-                self.game.sender.return_encoding = False
-                self.game.receiver.return_encoding = True
-                self.receiver_hidden = self.game.receiver(self.signals)
-                self.game.receiver.return_encoding = False
+            self.semirednoun_reconstructions = torch.stack(semirednoun_recons)
+            self.semiredverb_reconstructions = torch.stack(semiredverb_recons)
+            self.red_reconstructions = torch.stack(red_recons)
+            self.allred_reconstructions = torch.cat((self.semirednoun_reconstructions, self.semiredverb_reconstructions, self.red_reconstructions))
+            self.other_reconstructions = torch.stack(other_recons)
+
+            self.semirednoun_reconent = torch.distributions.Categorical(logits=self.semirednoun_reconstructions.view(len(self.semirednoun_reconstructions), self.n_roles, self.n_atoms)).entropy()
+            self.semiredverb_reconent = torch.distributions.Categorical(logits=self.semiredverb_reconstructions.view(len(self.semiredverb_reconstructions), self.n_roles, self.n_atoms)).entropy()
+            self.red_reconent = torch.distributions.Categorical(logits=self.red_reconstructions.view(len(self.red_reconstructions), self.n_roles, self.n_atoms)).entropy()
+            self.allred_reconent = torch.distributions.Categorical(logits=self.allred_reconstructions.view(len(self.allred_reconstructions), self.n_roles, self.n_atoms)).entropy()
+            self.other_reconent = torch.distributions.Categorical(logits=self.other_reconstructions.view(len(self.other_reconstructions), self.n_roles, self.n_atoms)).entropy()
+
+            self.idx_semantics = by_attribute_input.argmax(dim=-1)
+            self.semired_idx_semantics = by_attribute_input_semired.argmax(dim=-1)
+            self.red_idx_semantics = by_attribute_input_red.argmax(dim=-1)
+            self.allred_idx_semantics = by_attribute_input_allred.argmax(dim=-1)
+            self.other_idx_semantics = by_attribute_input_other.argmax(dim=-1)
+
+            self.sender.return_raw = True
+
+            signals, self.logits, entropys = self.sender(dataset)
+
+            self.sender.return_raw = False
+
+    def jaccard_similarity(self, list1, list2):
+        '''
+        A helper function to compute jaccard similarity for signal uniqueness measure
+
+        input: two lists (of uni/bi/trigrams)
+
+        returns numerical "overlap"/jaccard similarity
+        '''
+        intersection = len(list(set(list1).intersection(list2)))
+        union = (len(set(list1)) + len(set(list2))) - intersection
+        return float(intersection) / union
+
+    def msg_len(self):
+        '''
+        Computes message length for signals in different meaning types
+        '''
+        self.len_avg = sum(self.interaction.message_length[i].long().item() for i in range(self.interaction.size)) / self.interaction.size
+        self.semiredlen_avg = sum(self.semired_signals.message_length[i].long().item() for i in range(self.semired_signals.size(0))) / self.semired_signals.size(0)
+        self.redlen_avg = sum(self.red_signals.message_length[i].long().item() for i in range(self.red_signals.size(0))) / self.red_signals.size(0)
+        self.all_redlen_avg = sum(self.all_red_signals.message_length[i].long().item() for i in
+                              range(self.all_red_signals.size(0))) / self.all_red_signals.size(0)
+        self.otherlen_avg = sum(self.other_signals.message_length[i].long().item() for i in range(self.other_signals.size(0))) / self.other_signals.size(0)
+
+        return self.len_avg, self.semiredlen_avg, self.redlen_avg, self.all_redlen_avg, self.otherlen_avg
+
+    def save_interaction(self, interaction, filename):
+        torch.save(interaction, filename)
+
+    def get_pair_stats(self, vocab):
+        '''
+        Gets ngram frequency information from all the signals used in the interaction
+
+        input: a dictionary of the form signal: frequency
+        returns: ordered dicts for each ngram level
+        '''
+        pairs1 = {}
+        pairs2 = {}
+        pairs3 = {}
+        #pairs4 = {}
+        #pairs5 = {}
+        for word, frequency in vocab.items():
+            symbols = [char for char in word]
+            # count occurrences of pairs
+            for i in range(len(symbols)):   # unigrams
+                pair = (symbols[i])
+                current_frequency = pairs1.get(pair, 0)
+                pairs1[pair] = current_frequency + frequency
+            for i in range(len(symbols) - 1):   # bigrams
+                pair = (symbols[i], symbols[i + 1])
+                current_frequency = pairs2.get(pair, 0)
+                pairs2[pair] = current_frequency + frequency
+            for i in range(len(symbols) - 2):   # trigrams
+                pair = (symbols[i], symbols[i + 1], symbols[i + 2])
+                current_frequency = pairs3.get(pair, 0)
+                pairs3[pair] = current_frequency + frequency
+            # for i in range(len(symbols) - 3):   # 4-grams
+            #     pair = (symbols[i], symbols[i + 1], symbols[i + 2], symbols[i + 3])
+            #     current_frequency = pairs4.get(pair, 0)
+            #     pairs4[pair] = current_frequency + frequency
+            # for i in range(len(symbols) - 4):  # 5-grams
+            #     pair = (symbols[i], symbols[i + 1], symbols[i + 2], symbols[i + 3], symbols[i + 4])
+            #     current_frequency = pairs5.get(pair, 0)
+            #     pairs5[pair] = current_frequency + frequency
+
+        pairs1_descending = OrderedDict(sorted(pairs1.items(), key=lambda kv: kv[1], reverse=True))
+        pairs2_descending = OrderedDict(sorted(pairs2.items(), key=lambda kv: kv[1], reverse=True))
+        pairs3_descending = OrderedDict(sorted(pairs3.items(), key=lambda kv: kv[1], reverse=True))
+        #pairs4_descending = OrderedDict(sorted(pairs4.items(), key=lambda kv: kv[1], reverse=True))
+        #pairs5_descending = OrderedDict(sorted(pairs5.items(), key=lambda kv: kv[1], reverse=True))
+
+        pairs1 = dict((''.join(k), v) for k,v in pairs1_descending.items())
+        pairs2 = dict((''.join(k), v) for k,v in pairs2_descending.items())
+        pairs3 = dict((''.join(k), v) for k,v in pairs3_descending.items())
+        #pairs4 = dict((''.join(k), v) for k,v in pairs4_descending.items())
+        #pairs5 = dict((''.join(k), v) for k,v in pairs5_descending.items())
+
+        return pairs1, pairs2, pairs3 #, pairs4, pairs5
+
+    def entropy(self, p):
+        res = 0.0
+        for x in p:
+            res += x * log(x)
+        return -res
+
+    def dump(self):
+        '''
+        Computes an array of metrics:
+            mean and partial accuracy of interactions
+            signal uniqueness
+
+        '''
+        acc = 0.0
+        acc_or = 0.0
+
+        self.input_sents = []
+        self.red_input_sents = []
+        self.other_input_sents = []
+        self.red_indices = []
+        self.output_sents = []
+        self.char_messages = []
+        self.char_red_messages = []
+        self.char_other_messages = []
+
+        for i in range(self.interaction.size):
+            sender_input = self.interaction.sender_input[i]
+            sender_input = sender_input.view(self.n_roles, self.n_atoms)
+
+            if torch.equal(sender_input[0], sender_input[3]) or torch.equal(sender_input[1], sender_input[4]):
+                msg = f"{','.join([self.chars[x.item()] for x in self.interaction.message[i]])}"
+                msg = re.sub('[E,]', '', msg) #E represents EOS character
+                self.char_red_messages.append(msg)
+                self.red_indices.append(i)
+                input_symbols = sender_input.argmax(dim=-1)
+                input_list = [input_symbol.item() for input_symbol in input_symbols]
+                sent = [self.indices[str(input)] for input in input_list]
+                self.red_input_sents.append(f"{' '.join(sent)}")
+            else:
+                msg = f"{','.join([self.chars[x.item()] for x in self.interaction.message[i]])}"
+                msg = re.sub('[E,]', '', msg)
+                self.char_other_messages.append(msg)
+                #self.red_indices.append(i)
+                input_symbols = sender_input.argmax(dim=-1)
+                input_list = [input_symbol.item() for input_symbol in input_symbols]
+                sent = [self.indices[str(input)] for input in input_list]
+                self.other_input_sents.append(f"{' '.join(sent)}")
+
+            message = self.interaction.message[i]
+
+            receiver_output = self.interaction.receiver_output[i]
+            receiver_output = receiver_output.view(self.n_roles, self.n_atoms)
+
+            input_symbols = sender_input.argmax(dim=-1)
+            output_symbols = receiver_output.argmax(dim=-1)
+
+            single_acc = (torch.sum(input_symbols == output_symbols) == self.n_roles).float()
+            single_acc_or = (input_symbols == output_symbols).float()
+            acc += single_acc
+            acc_or += single_acc_or
+
+            input_list = [input_symbol.item() for input_symbol in input_symbols]
+            output_list = [output_symbol.item() for output_symbol in output_symbols]
+
+            input_sent = [self.indices[str(input)] for input in input_list]
+            output_sent = [self.indices[str(output)] for output in output_list]
+
+            self.input_sents.append(f"{' '.join(input_sent)}")
+            self.output_sents.append(f"{' '.join(output_sent)}")
+
+            msg = f"{','.join([self.chars[x.item()] for x in message])}"
+            msg = re.sub('[E,]', '', msg)
+            self.char_messages.append(msg)
+
+        acc = acc.mean().item()
+        acc /= self.interaction.size
+        acc_or = acc_or.mean().item()
+        acc_or /= self.interaction.size
+
+        #self.char_messages.append(f"{','.join([self.chars[x.item()] for x in message])}")
+
+        #mode1 = 'a' if os.path.exists(f"{filename}.csv") else 'w'
+        #mode2 = 'a' if os.path.exists(f"{filename}_MSGS.txt") else 'w'
+
+        #with open(f"{filename}.csv", mode1) as outfile:
+        #    writer = csv.writer(outfile)
+        #    writer.writerow(
+        #        [f"{' '.join(input_sent)}", f"{','.join([grammar_chars[x.item()] for x in message])}",
+        #         f"{' '.join(output_sent)}"])
+
+        # with open(f"{filename}_MSGS.txt", mode2) as outfile:
+        #     outfile.write(f"{','.join([grammar_chars[x.item()] for x in message])}")
+        #     outfile.write("\n")
+
+        # with open(f"{filename}_RED_MSGS.txt", mode2) as outfile:
+        #     for message in red_messages:
+        #         outfile.write(f"{','.join([grammar_chars[x.item()] for x in message])}")
+        #         outfile.write("\n")
+
+        # calculate n-gram frequencies and entropys (for all and red)
+        # BPE METHOD
+        # with open(f"messages/{self.fp}_MSGS.txt", 'r') as infile:
+        #     infile = infile.readlines()
+        #     newdata = []
+        #     for line in infile:
+        #         line = re.sub('[E,\n]', '', line)
+        #         newdata.append(line)
+        #
+        # with open(f"messages/{self.fp}_RED_MSGS.txt", 'r') as infile:
+        #     infile = infile.readlines()
+        #     reddata = []
+        #     for line in infile:
+        #         line = re.sub('[E,\n]', '', line)
+        #         reddata.append(line)
+
+        new_seqs_dict = {}
+        red_seqs_dict = {}
+        other_seqs_dict = {}
+
+        # for entry in self.char_messages:
+        #     try:
+        #         new_seqs_dict[entry] += 1
+        #     except KeyError:
+        #         new_seqs_dict[entry] = 0
+        #         new_seqs_dict[entry] += 1
+
+        for entry in self.char_other_messages:
+            try:
+                other_seqs_dict[entry] += 1
+            except KeyError:
+                other_seqs_dict[entry] = 0
+                other_seqs_dict[entry] += 1
+
+        for entry in self.char_red_messages:
+            try:
+                red_seqs_dict[entry] += 1
+            except KeyError:
+                red_seqs_dict[entry] = 0
+                red_seqs_dict[entry] += 1
+
+        #get random samples of non-redundant messages
+        self.char_other_samp_messages = random.sample(self.char_other_messages, len(self.char_red_messages))
+        new_other_messages = [msg for msg in self.char_other_messages if msg not in self.char_other_samp_messages]
+        self.char_other_samp_messages2 = random.sample(new_other_messages, len(self.char_other_samp_messages))
+
+        # self.char_other_samp_messages = random.sample(self.char_other_messages, len(self.char_red_messages))
+        # self.char_other_samp_messages = random.sample(self.char_red_messages, len(self.char_other_messages))
+        # self.char_other_samp_messages2 = random.sample(self.char_other_messages, int(len(self.char_red_messages)/2))
+
+        samp_seqs_dict = {}
+        for entry in self.char_other_samp_messages:
+            try:
+                samp_seqs_dict[entry] += 1
+            except KeyError:
+                samp_seqs_dict[entry] = 0
+                samp_seqs_dict[entry] += 1
+
+        samp_seqs_dict2 = {}
+        for entry in self.char_other_samp_messages2:
+            try:
+                samp_seqs_dict2[entry] += 1
+            except KeyError:
+                samp_seqs_dict2[entry] = 0
+                samp_seqs_dict2[entry] += 1
+
+        ndict1, ndict2, ndict3 = self.get_pair_stats(new_seqs_dict)
+        rdict1, rdict2, rdict3 = self.get_pair_stats(red_seqs_dict)
+        odict1, odict2, odict3 = self.get_pair_stats(other_seqs_dict)
+        sdict1, sdict2, sdict3 = self.get_pair_stats(samp_seqs_dict)
+        s2dict1, s2dict2, s2dict3 = self.get_pair_stats(samp_seqs_dict2)
+
+        self.frequencies = {}
+        self.frequencies['unigram'] = ndict1
+        self.frequencies['bigram'] = ndict2
+        self.frequencies['trigram'] = ndict3
+        #frequencies['4-gram'] = ndict4
+        #frequencies['5-gram'] = ndict5
+
+        #redundant
+        self.red_frequencies = {}
+        self.red_frequencies['unigram'] = rdict1
+        self.red_frequencies['bigram'] = rdict2
+        self.red_frequencies['trigram'] = rdict3
+        #red_frequencies['4-gram'] = rdict4
+        #red_frequencies['5-gram'] = rdict5
+
+        #non-redundant
+        self.other_frequencies = {}
+        self.other_frequencies['unigram'] = odict1
+        self.other_frequencies['bigram'] = odict2
+        self.other_frequencies['trigram'] = odict3
+        
+        self.samp_frequencies = {}
+        self.samp_frequencies['unigram'] = sdict1
+        self.samp_frequencies['bigram'] = sdict2
+        self.samp_frequencies['trigram'] = sdict3
+
+        self.samp_frequencies2 = {}
+        self.samp_frequencies2['unigram'] = s2dict1
+        self.samp_frequencies2['bigram'] = s2dict2
+        self.samp_frequencies2['trigram'] = s2dict3
+
+        #JACCARDS
+        #Unigram
+        sorted_reds_unis = sorted(self.red_frequencies['unigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_other_unis = sorted(self.other_frequencies['unigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_unis = sorted(self.samp_frequencies['unigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_unis2 = sorted(self.samp_frequencies2['unigram'].items(), key=lambda item: item[1], reverse=True)
+        
+        sorted_reds_unis = sorted_reds_unis[:100]
+        sorted_reds_unis = [k[0] for k in sorted_reds_unis]
+        sorted_other_unis = sorted_other_unis[:100]
+        sorted_other_unis = [k[0] for k in sorted_other_unis]
+        sorted_samps_unis = sorted_samps_unis[:100]
+        sorted_samps_unis = [k[0] for k in sorted_samps_unis]
+        sorted_samps_unis2 = sorted_samps_unis2[:100]
+        sorted_samps_unis2 = [k[0] for k in sorted_samps_unis2]
+        self.uni_jaccard = self.jaccard_similarity(sorted_reds_unis, sorted_other_unis)
+        self.uni_and_jaccard = self.jaccard_similarity(sorted_samps_unis, sorted_reds_unis)
+        #self.uni_and_jaccard = self.jaccard_similarity(sorted_samps_unis, sorted_other_unis)
+        self.uni_nonred_jaccard = self.jaccard_similarity(sorted_samps_unis, sorted_samps_unis2)
+
+        sorted_reds_bis = sorted(self.red_frequencies['bigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_other_bis = sorted(self.other_frequencies['bigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_bis = sorted(self.samp_frequencies['bigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_bis2 = sorted(self.samp_frequencies2['bigram'].items(), key=lambda item: item[1], reverse=True)
+
+        sorted_reds_bis = sorted_reds_bis[:100]
+        sorted_reds_bis = [k[0] for k in sorted_reds_bis]
+        sorted_other_bis = sorted_other_bis[:100]
+        sorted_other_bis = [k[0] for k in sorted_other_bis]
+        sorted_samps_bis = sorted_samps_bis[:100]
+        sorted_samps_bis = [k[0] for k in sorted_samps_bis]
+        sorted_samps_bis2 = sorted_samps_bis2[:100]
+        sorted_samps_bis2 = [k[0] for k in sorted_samps_bis2]
+        self.bi_jaccard = self.jaccard_similarity(sorted_reds_bis, sorted_other_bis)
+        self.bi_and_jaccard = self.jaccard_similarity(sorted_samps_bis, sorted_reds_bis)
+        #self.bi_and_jaccard = self.jaccard_similarity(sorted_samps_bis, sorted_other_bis)
+        self.bi_nonred_jaccard = self.jaccard_similarity(sorted_samps_bis, sorted_samps_bis2)
+
+        sorted_reds_tris = sorted(self.red_frequencies['trigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_other_tris = sorted(self.other_frequencies['trigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_tris = sorted(self.samp_frequencies['trigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_samps_tris2 = sorted(self.samp_frequencies2['trigram'].items(), key=lambda item: item[1], reverse=True)
+        sorted_reds_tris = sorted_reds_tris[:100]
+        sorted_reds_tris = [k[0] for k in sorted_reds_tris]
+        sorted_other_tris = sorted_other_tris[:100]
+        sorted_other_tris = [k[0] for k in sorted_other_tris]
+        sorted_samps_tris = sorted_samps_tris[:100]
+        sorted_samps_tris = [k[0] for k in sorted_samps_tris]
+        sorted_samps_tris2 = sorted_samps_tris2[:100]
+        sorted_samps_tris2 = [k[0] for k in sorted_samps_tris2]
+        self.tri_jaccard = self.jaccard_similarity(sorted_reds_tris, sorted_other_tris)
+        self.tri_and_jaccard = self.jaccard_similarity(sorted_samps_tris, sorted_reds_tris)
+        #self.tri_and_jaccard = self.jaccard_similarity(sorted_samps_tris, sorted_other_tris)
+        self.tri_nonred_jaccard = self.jaccard_similarity(sorted_samps_tris, sorted_samps_tris2)
+
+        print(f"Mean exact match accuracy is {acc}")
+        print(f"Mean partial match accuracy is {acc_or}")
+        return acc, acc_or
+    
+    def find_lengths(self, messages: torch.Tensor) -> torch.Tensor:
+        '''
+        :param messages: A tensor of term ids, encoded as Long values, of size (batch size, max sequence length).
+        :returns A tensor with lengths of the sequences, including the end-of-sequence symbol <eos> (in EGG, it is 0).
+        If no <eos> is found, the full length is returned (i.e. messages.size(1)).
+
+        >>> messages = torch.tensor([[1, 1, 0, 0, 0, 1], [1, 1, 1, 10, 100500, 5]])
+        >>> lengths = find_lengths(messages)
+        >>> lengths
+        tensor([3, 6])
+        '''
+        max_k = messages.size(1)
+        zero_mask = messages == 0
+        # a bit involved logic, but it seems to be faster for large batches than slicing batch dimension and
+        # querying torch.nonzero()
+        # zero_mask contains ones on positions where 0 occur in the outputs, and 1 otherwise
+        # zero_mask.cumsum(dim=1) would contain non-zeros on all positions after 0 occurred
+        # zero_mask.cumsum(dim=1) > 0 would contain ones on all positions after 0 occurred
+        # (zero_mask.cumsum(dim=1) > 0).sum(dim=1) equates to the number of steps  happened after 0 occured (including it)
+        # max_k - (zero_mask.cumsum(dim=1) > 0).sum(dim=1) is the number of steps before 0 took place
+
+        lengths = max_k - (zero_mask.cumsum(dim=1) > 0).sum(dim=1)
+        lengths.add_(1).clamp_(max=max_k)
+
+        return lengths
 
 
-        self.game.sender.training = True
-        self.game.receiver.training = True
+    # def get_interactions(self, dataset, get_hiddens=True, on_cpu=False):
+    #     ''''
+    #     input: dataset, expected as a single stack of tensors
+
+    #     Generates language for a given dataset collecting interactions
+    #     for each input. Separates into signals, reconstructions, and logits
+
+    #     todo: make work for non-stacked (batched)
+        
+    #     '''
+        
+    #     by_attribute_input = dataset.view(len(dataset), self.n_roles, self.n_atoms)
+    #     labels = by_attribute_input.argmax(dim=-1).view(len(dataset) * self.n_roles)
+
+    #     if not on_cpu:
+    #         dataset = dataset.to(self.config.device)
+    #         self.game = self.game.to(self.config.device)
+    #         labels = labels.to(self.config.device)
+
+    #     self.game.sender.training = False
+    #     self.game.receiver.training = False
+    #     with torch.no_grad():
+    #         self.loss, self.interaction = self.game(dataset, labels)
+
+    #         self.signals = self.interaction.message
+    #         self.reconstructions = self.interaction.receiver_output
+    #         self.idx_reconstructions = self.data.logits_to_idx(self.interaction.receiver_output)
+    #         self.idx_semantics = self.data.logits_to_idx(dataset)
+
+    #         self.game.sender.return_raw = True
+    #         signals, self.logits, entropys = self.game.sender(dataset)
+    #         self.game.sender.return_raw = False
+    #         if get_hiddens:
+    #             self.game.sender.return_encoding = True
+    #             self.sender_hidden = self.game.sender(dataset)
+    #             self.game.sender.return_encoding = False
+    #             self.game.receiver.return_encoding = True
+    #             self.receiver_hidden = self.game.receiver(self.signals)
+    #             self.game.receiver.return_encoding = False
+
+
+    #     self.game.sender.training = True
+    #     self.game.receiver.training = True
 
     #Topographic Similarity
     #Performs topsim along with a number of helper functions
@@ -741,18 +1249,18 @@ class Analyser(object):
             ).mean( axis=0)
 
         role_encoded_position = [[] for _ in range(n_roles)]
-        role_encoded_position_values = [[] for _ in range(n_roles)]
+        role_encoded_position_atoms = [[] for _ in range(n_roles)]
 
         for position in range(signal_len):
             role = torch.argmax(role_position_prob[:, position])
             role_v = role_position_prob[:, position].max()
             role_encoded_position[int(role)].append(position)
-            role_encoded_position_values[int(role)].append(float(role_v))
+            role_encoded_position_atoms[int(role)].append(float(role_v))
 
         for i, role in enumerate(role_encoded_position):
             if len(role)>max_substring_len:
                 ind = np.argpartition(
-                    role_encoded_position_values[i], 
+                    role_encoded_position_atoms[i], 
                     -max_substring_len
                 )[-max_substring_len:].tolist()
                 

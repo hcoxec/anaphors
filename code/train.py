@@ -3,7 +3,7 @@ import torch
 
 from torch.utils.data import DataLoader
 
-
+from dataloader import DataHandler
 
 from loss import ReconstructionLoss as Loss
 from agents import SenderInput, ReceiverOutput, RnnSenderReinforce, RnnReceiverDeterministic
@@ -44,6 +44,7 @@ def build_model(config):
         loss, 
         sender_entropy_coeff=config.sender_entropy, 
         receiver_entropy_coeff=0.0, #RL isn't used for the receiver
+        length_cost=config.length_cost
     )
 
     return game
@@ -55,41 +56,46 @@ def reconstruction_game(config):
     streamer = setup_streamer(config)
 
     #load the desired dataset class from the object registry
-    Dataset = registry.lookup("dataset", config.dataset)
-
+    # Dataset = registry.lookup("dataset", config.dataset)
     
-    all_data = {}
-    for split in config.all_splits:
-        all_data[split] = Dataset(config, split, scaling=1)
+    # all_data = {}
+    # for split in config.all_splits:
+    #     all_data[split] = Dataset(config, split, scaling=1)
 
-    #instantiate Training Dataset and loader
-    train_data = all_data[config.train_split]
-    train_data.data_scaling = config.data_scaling
-    train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
+    # #instantiate Training Dataset and loader
+    # train_data = all_data[config.train_split]
+    # train_data.data_scaling = config.data_scaling
+    # train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
 
-    #Also setup data for each validation step
-    val_data = all_data[config.val_split]
-    val_loader = DataLoader(val_data, batch_size=config.batch_size, shuffle=True)
+    # #Also setup data for each validation step
+    # val_data = all_data[config.val_split]
+    # val_loader = DataLoader(val_data, batch_size=config.batch_size, shuffle=True)
 
-    print(f'Current Training Data Size: {train_data.true_len}')
-    print(f'Current Scaled Training Data Size: {len(train_data)}')
-    print(f'Current Validation Data Size: {len(val_data)}')
-    
+    # print(f'Current Training Data Size: {train_data.true_len}')
+    # print(f'Current Scaled Training Data Size: {len(train_data)}')
+    # print(f'Current Validation Data Size: {len(val_data)}')
+
+    data = DataHandler(config)
+    train_data = data.raw_train
+    val_data = data.raw_val
+    train_loader = data.train_loader
+    val_loader = data.val_loader
+
     #Some analyses need to know how many roles/atoms the dataset has
     #if not specified in config, infer from the training data
-    try:
-        n_roles = config.n_roles
-        n_atoms = config.n_atoms
+    #try:
+    n_roles = config.n_roles
+    n_atoms = config.n_atoms
 
-    except Exception as e:
-        #get dependency role labels as a proxy for roles
-        n_roles = len(train_data.enc_lang.dep_words.keys())
-        #get words in the input langueage as a proxy for atoms
-        n_atoms = train_data.enc_lang.n_words
+    #except Exception as e:
+        # #get dependency role labels as a proxy for roles
+        # n_roles = len(train_data.enc_lang.dep_words.keys())
+        # #get words in the input langueage as a proxy for atoms
+        # n_atoms = train_data.enc_lang.n_words
 
-        setattr(config, 'n_roles', n_roles)
-        setattr(config, 'n_atoms', n_atoms)
-        print(f'attributes and values assumed: {n_roles}, {n_atoms}')
+        # setattr(config, 'n_roles', n_roles)
+        # setattr(config, 'n_atoms', n_atoms)
+        # print(f'attributes and values assumed: {n_roles}, {n_atoms}')
     
     game = build_model(config)
 
@@ -112,11 +118,11 @@ def reconstruction_game(config):
         )
     
     if 'analysis' in config.callbacks:
-        analysis_splits = [all_data[x] for x in config.analysis_splits]
+        #analysis_splits = [all_data[x] for x in config.analysis_splits]
         callbacks.append(
             StreamAnalysis(
                 train_data=train_data,
-                test_data=analysis_splits,
+                test_data=val_data,
                 streamer=streamer,
                 config=config
             )
@@ -142,7 +148,7 @@ def reconstruction_game(config):
         game=game, 
         optimizer=optimizer, 
         train_data=train_loader,
-        validation_data=val_data,
+        validation_data=val_loader,
         wandb_project= config.wandb_name,
         callbacks=callbacks,
     )
