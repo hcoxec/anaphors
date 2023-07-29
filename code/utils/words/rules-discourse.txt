@@ -1,0 +1,6 @@
+S -> VP1 Conj VP2
+VP1 -> NP1 V
+VP2 -> NP2 V
+NP1 -> N
+NP2 -> N
+Conj -> 'and'

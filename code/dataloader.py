@@ -12,7 +12,7 @@ from os.path import exists
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 import torch
 
-from ScaledDataset import ScaledDataset
+from utils.ScaledDataset import ScaledDataset
 
 from itertools import combinations
 
@@ -130,7 +130,7 @@ class DataHandler(object):
         # torch.save(self.comp_test_set, f'data/{self.setting}_comp_test_set.tar')
 
         #saving the corresponding phrase data and grammar
-        with open(f"{self.gram_fn}_dict.json", 'w+') as outfile:
+        with open(f"utils/dicts/{self.gram_fn}_dict.json", 'w+') as outfile:
             json.dump(self.index2word, outfile, indent=5)
 
         phrase_data = [self.phrase_train, self.phrase_val, self.phrase_test]
@@ -246,11 +246,11 @@ class DataHandler(object):
         returns: nltk.CFG
         '''
         if self.probs == "uniform":
-            with open("words/verbs-discourse.txt") as verbfile:
+            with open("utils/words/verbs-discourse.txt") as verbfile:
                 VERBS = [line.strip() for line in verbfile][:self.verb_cap]
-            with open("words/nouns-discourse.txt") as nounfile:
+            with open("utils/words/nouns-discourse.txt") as nounfile:
                 NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
-            with open("words/rules-discourse.txt") as rulefile:
+            with open("utils/words/rules-discourse.txt") as rulefile:
                 RULES = [line.strip() for line in rulefile]
 
             self.verbs = VERBS
@@ -259,24 +259,24 @@ class DataHandler(object):
             v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
             n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
-            with open('words/grammar-discourse.txt', 'w') as f:
+            with open('utils/words/grammar-discourse.txt', 'w') as f:
                 for item in RULES + v_rules + n_rules:
                     f.write("%s\n" % item)
-            with open("words/grammar-discourse.txt") as grammarfile:
+            with open("utils/words/grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             return CFG.fromstring(grammar)
 
         elif self.probs == "powerlaw":
-            with open("words/plaw_grammar-discourse.txt") as grammarfile:
+            with open("utils/words/plaw_grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             return PCFG.fromstring(grammar)
 
         elif self.probs == "mixed":
-            with open("words/verbs-discourse.txt") as verbfile:
+            with open("utils/words/verbs-discourse.txt") as verbfile:
                 VERBS = [line.strip() for line in verbfile][:self.verb_cap]
-            with open("words/nouns-discourse.txt") as nounfile:
+            with open("utils/words/nouns-discourse.txt") as nounfile:
                 NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
-            with open("words/rules-discourse.txt") as rulefile:
+            with open("utils/words/rules-discourse.txt") as rulefile:
                 RULES = [line.strip() for line in rulefile]
 
             self.verbs = VERBS
@@ -285,14 +285,14 @@ class DataHandler(object):
             v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
             n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
-            with open('words/grammar-discourse.txt', 'w') as f:
+            with open('utils/words/grammar-discourse.txt', 'w') as f:
                 for item in RULES + v_rules + n_rules:
                     f.write("%s\n" % item)
-            with open("words/grammar-discourse.txt") as grammarfile:
+            with open("utils/words/grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             self.unifgram = CFG.fromstring(grammar)
 
-            with open("words/plaw_grammar-discourse.txt") as grammarfile:
+            with open("utils/words/plaw_grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             self.plawgram = PCFG.fromstring(grammar)
 
