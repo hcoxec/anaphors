@@ -18,13 +18,14 @@ Included under the scripts directory is a file **run.sh** which runs this by cal
 
 ```bash run.sh```
 
-Also included is **run_array.sh** which runs the model for 10 initializations and provides an example of how to add commandline arguments for run dependent parameters, like random seed.
+Also included is **run_array.sh** which runs the model for 10 initialisations and provides an example of how to add commandline arguments for running dependent parameters, like random seed.
 
 
 ### General
 
 1.  Data is provided in the ```data/redundant_predicates``` directory.
-
+- 'redlarge_{train/val/test}': multi-agent experiment data
+- 'redlarge_{comp/tok/null}_comp_{train/val/test}': learnability data (in each handcrafted language: 'No Elision'/'Pronoun'/'Pro-drop' respectively)
 
 2. Code for the main multi-agent experiments (section "Languages with anaphoric structure emerge between neural agents") is found in the ```code``` directory.
 
