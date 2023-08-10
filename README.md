@@ -7,7 +7,7 @@ Create a new virtual environment and run:
 
 ```bash scripts/setup.sh```
 
-to install required packages. Aternately install the packages in **scripts/requirements.txt** however you like.
+to install required packages. Alternatively, install the packages in **scripts/requirements.txt** however you like.
 
 ### Running Jobs
 Each run needs a config file, the config used for the experiments in the paper can be found under **configs/cogsci_2023.jsonnet**
