@@ -55,7 +55,7 @@ For evaluation, use the notebook ```interaction_checkpoint_eval.ipynb```.
 ```interaction_config.jsonnet``` specifies the config used in the multi-agent experiments whose checkpoints are being evaluated. This file also imports functions from ```analyser.py```, which provides support for computing the measures outlined in the paper.
 
 
-3.  Code for the first section of the paper "Neural agents can learn languages with anaphoric structure" can be found as Jupter notebooks in the ```experiments``` directory:
+3.  Code for the first section of the paper "Neural agents can learn languages with anaphoric structure" can be found as Jupyter notebooks in the ```experiments``` directory:
  - ```learnability_expts.ipynb``` (training Receiver, computing Predictive Ambiguity)
  - ```learnability_eval.ipynb``` (plotting loss curves)
  - ```su_handcrafted_langs.ipynb``` (computing signal uniqueness for handcrafted languages)
