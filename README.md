@@ -25,7 +25,7 @@ Also included is **run_array.sh** which runs the model for 10 initialisations an
 
 1.  Data is provided in the ```data/redundant_predicates``` directory.
 - 'redlarge_{train/val/test}': multi-agent experiment data
-- 'redlarge_{comp/tok/null}_comp_{train/val/test}': learnability data (in each handcrafted language: 'No Elision'/'Pronoun'/'Pro-drop' respectively)
+- 'redlarge_{comp/tok/null}\_comp\_{train/val/test}': learnability data (in each handcrafted language: 'No Elision'/'Pronoun'/'Pro-drop' respectively)
 
 2. Code for the main multi-agent experiments (section "Languages with anaphoric structure emerge between neural agents") is found in the ```code``` directory.
 
