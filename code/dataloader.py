@@ -10,9 +10,8 @@ import random
 from os.path import exists
 
 from torch.utils.data import DataLoader, Dataset, TensorDataset
+from ScaledDataset import ScaledDataset
 import torch
-
-from utils.ScaledDataset import ScaledDataset
 
 from itertools import combinations
 
@@ -246,11 +245,11 @@ class DataHandler(object):
         returns: nltk.CFG
         '''
         if self.probs == "uniform":
-            with open("utils/words/verbs-discourse.txt") as verbfile:
+            with open("code/utils/words/verbs-discourse.txt") as verbfile:
                 VERBS = [line.strip() for line in verbfile][:self.verb_cap]
-            with open("utils/words/nouns-discourse.txt") as nounfile:
+            with open("code/utils/words/nouns-discourse.txt") as nounfile:
                 NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
-            with open("utils/words/rules-discourse.txt") as rulefile:
+            with open("code/utils/words/rules-discourse.txt") as rulefile:
                 RULES = [line.strip() for line in rulefile]
 
             self.verbs = VERBS
@@ -259,24 +258,24 @@ class DataHandler(object):
             v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
             n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
-            with open('utils/words/grammar-discourse.txt', 'w') as f:
+            with open('code/utils/words/grammar-discourse.txt', 'w') as f:
                 for item in RULES + v_rules + n_rules:
                     f.write("%s\n" % item)
-            with open("utils/words/grammar-discourse.txt") as grammarfile:
+            with open("code/utils/words/grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             return CFG.fromstring(grammar)
 
         elif self.probs == "powerlaw":
-            with open("utils/words/plaw_grammar-discourse.txt") as grammarfile:
+            with open("code/utils/words/plaw_grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             return PCFG.fromstring(grammar)
 
         elif self.probs == "mixed":
-            with open("utils/words/verbs-discourse.txt") as verbfile:
+            with open("code/utils/words/verbs-discourse.txt") as verbfile:
                 VERBS = [line.strip() for line in verbfile][:self.verb_cap]
-            with open("utils/words/nouns-discourse.txt") as nounfile:
+            with open("code/utils/words/nouns-discourse.txt") as nounfile:
                 NOUNS = [line.strip() for line in nounfile][:self.noun_cap]
-            with open("utils/words/rules-discourse.txt") as rulefile:
+            with open("code/utils/words/rules-discourse.txt") as rulefile:
                 RULES = [line.strip() for line in rulefile]
 
             self.verbs = VERBS
@@ -285,14 +284,14 @@ class DataHandler(object):
             v_rules = ['V -> \'' + this_word + '\'' for this_word in VERBS]
             n_rules = ['N -> \'' + this_word + '\'' for this_word in NOUNS]
 
-            with open('utils/words/grammar-discourse.txt', 'w') as f:
+            with open('code/utils/words/grammar-discourse.txt', 'w') as f:
                 for item in RULES + v_rules + n_rules:
                     f.write("%s\n" % item)
-            with open("utils/words/grammar-discourse.txt") as grammarfile:
+            with open("code/utils/words/grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             self.unifgram = CFG.fromstring(grammar)
 
-            with open("utils/words/plaw_grammar-discourse.txt") as grammarfile:
+            with open("code/utils/words/plaw_grammar-discourse.txt") as grammarfile:
                 grammar = [line.strip() for line in grammarfile]
             self.plawgram = PCFG.fromstring(grammar)
 

@@ -63,7 +63,7 @@ class Analyser(object):
         self.other_idx_semantics = None
 
 
-    def get_interactions(self, dataset, variable_length, apply_padding=True):
+    def get_interactions(self, dataset, variable_length=True, apply_padding=True):
         '''
         Runs the passed dataset through the model self.game in order to generate
         interactions, including meaning signal mappings, signal logits, and 
@@ -176,11 +176,11 @@ class Analyser(object):
             self.allred_idx_semantics = by_attribute_input_allred.argmax(dim=-1)
             self.other_idx_semantics = by_attribute_input_other.argmax(dim=-1)
 
-            self.sender.return_raw = True
+            # self.sender.return_raw = True
 
-            signals, self.logits, entropys = self.sender(dataset)
+            # signals, self.logits, entropys = self.sender(dataset)
 
-            self.sender.return_raw = False
+            # self.sender.return_raw = False
 
     def jaccard_similarity(self, list1, list2):
         '''

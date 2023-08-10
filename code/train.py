@@ -1,17 +1,17 @@
 import torch
-
-
+import argparse
+import json
+from string import ascii_lowercase, punctuation, digits, ascii_uppercase
 from torch.utils.data import DataLoader
-
 from dataloader import DataHandler
 
 from loss import ReconstructionLoss as Loss
 from agents import SenderInput, ReceiverOutput, RnnSenderReinforce, RnnReceiverDeterministic
 from game import ReinforceGame as Game
-from utils import registry, setup_streamer
 
-from callbacks import CheckpointSaver, WandbLogger, StreamAnalysis
+from callbacks import CheckpointSaver, WandbLogger, StreamAnalysis, ProgressBarLogger, ConsoleLogger
 from trainer import Trainer
+from utils.setup import parse_args, load_arg_file, set_seeds, setup_streamer
 
 def build_model(config):
     data_size = config.n_roles*config.n_atoms
@@ -75,17 +75,25 @@ def reconstruction_game(config):
     # print(f'Current Scaled Training Data Size: {len(train_data)}')
     # print(f'Current Validation Data Size: {len(val_data)}')
 
+    #instantiate Training Dataset and loader
     data = DataHandler(config)
     train_data = data.raw_train
     val_data = data.raw_val
     train_loader = data.train_loader
     val_loader = data.val_loader
 
+    with open(f"code/utils/dicts/{config.gram_fn}_dict.json") as infile:
+        indices = json.load(infile)
+        
+    initial_chars = ascii_lowercase + punctuation + digits
+    chars = 'E'  # to mark EOS
+    chars += initial_chars[:config.signal_alphabet_size-1]    
+
     #Some analyses need to know how many roles/atoms the dataset has
     #if not specified in config, infer from the training data
     #try:
-    n_roles = config.n_roles
-    n_atoms = config.n_atoms
+    # n_roles = config.n_roles
+    # n_atoms = config.n_atoms
 
     #except Exception as e:
         # #get dependency role labels as a proxy for roles
@@ -96,7 +104,7 @@ def reconstruction_game(config):
         # setattr(config, 'n_roles', n_roles)
         # setattr(config, 'n_atoms', n_atoms)
         # print(f'attributes and values assumed: {n_roles}, {n_atoms}')
-    
+        
     game = build_model(config)
 
     callbacks = []
@@ -124,7 +132,9 @@ def reconstruction_game(config):
                 train_data=train_data,
                 test_data=val_data,
                 streamer=streamer,
-                config=config
+                config=config,
+                indices=indices,
+                chars=chars
             )
         )
     
@@ -133,6 +143,20 @@ def reconstruction_game(config):
             WandbLogger(
                 config=config
             )
+        )
+
+    if 'progress' in config.callbacks:
+        callbacks.append(
+            ProgressBarLogger(
+                n_epochs=config.epochs,
+                train_data_len=(len(data.train_set) / config.batch_size),
+                test_data_len=(len(data.val_set) / config.batch_size)
+            )
+        )
+    
+    if 'console' in config.callbacks:
+        callbacks.append(
+            ConsoleLogger(as_json=True, print_train_loss=True),
         )
 
     optimizer = torch.optim.Adam(
@@ -149,7 +173,7 @@ def reconstruction_game(config):
         optimizer=optimizer, 
         train_data=train_loader,
         validation_data=val_loader,
-        wandb_project= config.wandb_name,
+        wandb_project=config.wandb_name,
         callbacks=callbacks,
     )
     
@@ -161,3 +185,11 @@ def reconstruction_game(config):
 
 def main(config):
     reconstruction_game(config)
+
+if __name__ == '__main__':
+    args = parse_args()
+    config = load_arg_file(args)
+    print("===================================================")
+    print(f"Config Imported from {args.exp_config_file}")
+    print(f"Run ID: {config.run_id}")
+    main(config)

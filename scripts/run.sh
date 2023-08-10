@@ -2,10 +2,6 @@
 
 set -e
 
-cd ../code
+cd ..
 
-python main.py preprocess ../configs/cogsci_2023.jsonnet
-
-python main.py train ../configs/cogsci_2023.jsonnet
-
-python main.py eval ../configs/cogsci_2023.jsonnet
+python code/train.py configs/cogsci_2023copy.jsonnet

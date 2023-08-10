@@ -1,7 +1,6 @@
-attrs==0.3.2
 editdistance==0.6.2
 numpy==1.24.3
-python_Levenshtein==0.21.0
+Levenshtein==0.20.9
 scikit_learn==1.2.2
 scipy==1.10.1
 spacy==3.5.2
@@ -10,3 +9,8 @@ torchvision==0.15.1
 tqdm==4.65.0
 wandb==0.15.0
 jsonnet==0.20.0 
+torch==2.0.0
+matplotlib==3.7.1
+nltk==3.8.1
+pcfg==0.1.5
+rich==13.3.4

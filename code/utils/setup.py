@@ -6,7 +6,7 @@ import sys
 import re
 import json
 import _jsonnet
-import attr
+#import attr
 import random
 import numpy as np
 import datetime
@@ -31,43 +31,43 @@ class Config(object):
     def __repr__(self):
         return f"Experiment Config: {self.__dict__}"
 
-@attr.s
-class InferConfig:
-    global_config = attr.ib()
-    config = attr.ib()
-    config_args = attr.ib()
-    run_id = attr.ib()
-    logdir = attr.ib()
-    section = attr.ib()
-    beam_size = attr.ib()
-    output = attr.ib()
-    step = attr.ib()
-    debug = attr.ib(default=False)
-    method = attr.ib(default="beam_search")
-    mode = attr.ib(default="infer")
-    limit = attr.ib(default=None)
-    output_history = attr.ib(default=False)
-    streamer= attr.ib(default=None)
-    analyses = attr.ib(default=None)
+# @attr.s
+# class InferConfig:
+#     global_config = attr.ib()
+#     config = attr.ib()
+#     config_args = attr.ib()
+#     run_id = attr.ib()
+#     logdir = attr.ib()
+#     section = attr.ib()
+#     beam_size = attr.ib()
+#     output = attr.ib()
+#     step = attr.ib()
+#     debug = attr.ib(default=False)
+#     method = attr.ib(default="beam_search")
+#     mode = attr.ib(default="infer")
+#     limit = attr.ib(default=None)
+#     output_history = attr.ib(default=False)
+#     streamer= attr.ib(default=None)
+#     analyses = attr.ib(default=None)
 
 
-@attr.s
-class EvalConfig:
-    global_config = attr.ib()
-    logdir = attr.ib()
-    section = attr.ib()
-    inferred = attr.ib()
-    output = attr.ib()
-    etype = attr.ib(default="match")
+# @attr.s
+# class EvalConfig:
+#     global_config = attr.ib()
+#     logdir = attr.ib()
+#     section = attr.ib()
+#     inferred = attr.ib()
+#     output = attr.ib()
+#     etype = attr.ib(default="match")
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "mode",
-        choices=["mcd_split","preprocess", "train", "eval", "reval"],
-        help="train or eval",
-    )
+    # parser.add_argument(
+    #     "mode",
+    #     choices=["mcd_split","preprocess", "train", "eval", "reval"],
+    #     help="train or eval",
+    # )
     parser.add_argument("exp_config_file", help="jsonnet file for experiments")
     parser.add_argument("--config_args", help="exp configs")
     args = parser.parse_args()
@@ -87,21 +87,20 @@ def load_arg_file(args):
 
     #If using emerge v 2.0+ then run and model config are separate
 
-    if 'model_config' in exp_config.keys():
-        model_config = json.loads(
-            _jsonnet.evaluate_file(
-                exp_config['model_config'], tla_codes={"args": json.dumps(
-                    exp_config['model_config_args']
-                )}
-            )
-        )
+    # if 'model_config' in exp_config.keys():
+    #     model_config = json.loads(
+    #         _jsonnet.evaluate_file(
+    #             exp_config['model_config'], tla_codes={"args": json.dumps(
+    #                 exp_config['model_config_args']
+    #             )}
+    #         )
+    #     )
 
-        exp_config.update(model_config)
+    #     exp_config.update(model_config)
 
-    exp_config['mode'] = args.mode
+    #exp_config['mode'] = args.mode
     exp_config['device'] = "cuda" if torch.cuda.is_available() else "cpu"
 
-    
     global common_opts
 
     exp_config = Config(exp_config)
