@@ -12,7 +12,7 @@ to install required packages. Alternatively, install the packages in **scripts/r
 ### Running Jobs
 Each run needs a config file, the config used for the experiments in the paper can be found under **configs/cogsci_2023.jsonnet**
 
-Each run relies on **train.py**, where all the data preprocessing (either loading/generation) occurs, followed by the actual model training.
+Each run relies on **code/train.py**, where all the data preprocessing (either loading/generation) occurs, followed by the actual model training.
 
 Included under the scripts directory is a file **run.sh** which runs this by calling:
 
